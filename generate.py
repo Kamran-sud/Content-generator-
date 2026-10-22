@@ -1,6 +1,7 @@
 """Генерация короткого вертикального видео (Shorts/Reels) из script.txt.
 
-1. Озвучка текста через edge-tts (ru-RU-DmitryNeural) -> voice.mp3
+1. Озвучка текста через edge-tts (ru-RU-DmitryNeural) -> voice.mp3,
+   при ошибке edge-tts (например, блокировка IP GitHub Actions) — фоллбэк на gTTS
 2. Кадр 1080x1920: тёмный фон + текст сценария по центру с автопереносом строк
 3. Статичный кадр длительностью равной аудио + аудиодорожка
 4. Результат -> final_video.mp4
@@ -12,6 +13,7 @@ import sys
 
 import edge_tts
 import numpy as np
+from gtts import gTTS
 from PIL import Image, ImageDraw, ImageFont
 
 try:  # moviepy >= 2.0
@@ -27,6 +29,7 @@ SCRIPT_FILE = "script.txt"
 AUDIO_FILE = "voice.mp3"
 OUTPUT_FILE = "final_video.mp4"
 VOICE = "ru-RU-DmitryNeural"
+EDGE_TTS_TIMEOUT = 60  # секунд
 
 WIDTH, HEIGHT = 1080, 1920
 BG_COLOR = (18, 18, 24)
@@ -51,14 +54,35 @@ FONT_CANDIDATES = [
 
 def read_script(path: str) -> str:
     with open(path, encoding="utf-8") as f:
-        text = " ".join(f.read().split())
-    if not text:
+        raw = f.read()
+    if not raw.strip():
         sys.exit(f"Файл {path} пуст")
-    return text
+    return " ".join(raw.split())
 
 
-async def synthesize(text: str, path: str) -> None:
-    await edge_tts.Communicate(text, VOICE).save(path)
+async def synthesize_edge(text: str, path: str) -> None:
+    await asyncio.wait_for(edge_tts.Communicate(text, VOICE).save(path), timeout=EDGE_TTS_TIMEOUT)
+
+
+def synthesize_gtts(text: str, path: str) -> None:
+    tts = gTTS(text=text, lang="ru")
+    tts.save(path)
+
+
+def synthesize(text: str, path: str) -> None:
+    """Озвучка через edge-tts, при любой ошибке — через gTTS."""
+    try:
+        print(f"Озвучка через edge-tts голосом {VOICE} -> {path}")
+        asyncio.run(synthesize_edge(text, path))
+        if os.path.getsize(path) == 0:
+            raise edge_tts.exceptions.NoAudioReceived("Пустой аудиофайл")
+        return
+    except Exception as exc:  # NoAudioReceived, таймаут, сетевые ошибки
+        print(f"edge-tts не сработал ({type(exc).__name__}: {exc}), переключаюсь на gTTS")
+        if os.path.exists(path):
+            os.remove(path)
+    synthesize_gtts(text, path)
+    print(f"Озвучка через gTTS -> {path}")
 
 
 def find_font_path() -> str | None:
@@ -149,8 +173,7 @@ def build_video(text: str) -> None:
 def main() -> None:
     text = read_script(SCRIPT_FILE)
     print(f"Сценарий: {text}")
-    print(f"Озвучка голосом {VOICE} -> {AUDIO_FILE}")
-    asyncio.run(synthesize(text, AUDIO_FILE))
+    synthesize(text, AUDIO_FILE)
     print(f"Сборка видео -> {OUTPUT_FILE}")
     build_video(text)
     print("Готово!")
