@@ -1,0 +1,5 @@
+edge-tts
+moviepy
+ffmpeg-python
+numpy
+Pillow
